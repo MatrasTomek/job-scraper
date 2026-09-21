@@ -64,47 +64,74 @@ class JobScraper {
   async scrapeUpwork() {
     console.log('📍 Ściąganie Upwork...');
     const before = this.jobs.length;
+    // Upwork serwuje zwykłym żądaniom axios/cheerio stronę "Challenge" (403), a nawet
+    // przeglądarce headless (jak niżej) potrafi podsunąć zaporę Cloudflare "Just a moment..." —
+    // wykrywamy ją i zgłaszamy jako blokadę zamiast cicho zwracać 0 ofert.
+    let browser;
+    let cloudflareBlocked = false;
     try {
+      browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ userAgent: this.config.userAgent, locale: 'en-US' });
+
       for (const keyword of this.config.keywords) {
-        const url = `https://www.upwork.com/nx/search/jobs?q=${keyword}&sort=recency`;
+        const url = `https://www.upwork.com/nx/search/jobs?q=${encodeURIComponent(keyword)}&sort=recency`;
+        const page = await context.newPage();
 
-        const response = await axios.get(url, {
-          headers: { 'User-Agent': this.config.userAgent },
-          timeout: this.config.timeout
-        });
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.config.timeout * 3 });
+          await page.locator('[data-test="JobTile"], [data-test="JobCard"]').first().waitFor({ timeout: 10000 }).catch(() => {});
 
-        const $ = cheerio.load(response.data);
+          if (!cloudflareBlocked) {
+            const pageTitle = await page.title();
+            if (/just a moment/i.test(pageTitle)) cloudflareBlocked = true;
+          }
 
-        $('[data-test="JobCard"]').each((i, el) => {
-          const title = $(el).find('[data-test="JobTitle"]')?.text()?.trim();
-          const description = $(el).find('[data-test="JobDescription"]')?.text()?.slice(0, 200)?.trim();
-          const budget = $(el).find('[data-test="BudgetAmount"]')?.text()?.trim();
-          const jobLink = $(el).find('a')?.attr('href');
+          const cards = await page.locator('[data-test="JobTile"], [data-test="JobCard"]').evaluateAll(nodes =>
+            nodes.map(node => {
+              const titleEl = node.querySelector('[data-test="JobTitle"] a, [data-test="job-tile-title-link"], a[data-test="job-title-link"], h2 a, h3 a');
+              const descEl = node.querySelector('[data-test="JobDescription"], [data-test="job-description-text"]');
+              const budgetEl = node.querySelector('[data-test="BudgetAmount"], [data-test="job-type-label"], [data-test="is-fixed-price"]');
+              return {
+                title: titleEl?.innerText?.trim() || '',
+                description: descEl?.innerText?.trim() || '',
+                budget: budgetEl?.innerText?.trim() || '',
+                href: titleEl?.getAttribute('href') || ''
+              };
+            })
+          );
 
-          if (title && budget) {
+          for (const card of cards) {
+            if (!card.title) continue;
+
             this.jobs.push({
               platform: 'Upwork',
-              title,
-              description,
-              budget,
-              link: jobLink ? `https://www.upwork.com${jobLink}` : '',
+              title: card.title,
+              description: card.description.slice(0, 200),
+              budget: card.budget || 'N/A',
+              link: card.href ? new URL(card.href, 'https://www.upwork.com').href : '',
               keyword,
               scrapedAt: new Date().toISOString()
             });
           }
-        });
+        } finally {
+          await page.close();
+        }
       }
-      console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na Upwork`);
+      if (cloudflareBlocked) {
+        this.errors.push({
+          platform: 'Upwork',
+          error: 'Cloudflare Challenge ("Just a moment...") zablokował dostęp do listy ofert.',
+          hint: 'Sam headless Playwright nie wystarcza — Upwork wymaga rozwiązania Cloudflare Managed Challenge (np. wtyczka stealth, prawdziwa przeglądarka z profilem, lub oficjalne API Upwork).'
+        });
+        console.log('⚠️  Błąd Upwork: zablokowano przez Cloudflare (Just a moment...)');
+      } else {
+        console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na Upwork`);
+      }
     } catch (error) {
-      // Upwork zwraca stronę "Challenge" (403) dla żądań bez przeglądarki —
-      // samo axios+cheerio tego nie ominie, potrzebny byłby headless browser lub oficjalne API.
-      const isBotWall = error.response?.status === 403;
-      this.errors.push({
-        platform: 'Upwork',
-        error: error.message,
-        hint: isBotWall ? 'Upwork blokuje żądania botów (ochrona anty-scrapingowa) — wymaga headless browsera lub API.' : undefined
-      });
-      console.log(`⚠️  Błąd Upwork: ${error.message}${isBotWall ? ' (blokada anty-bot)' : ''}`);
+      this.errors.push({ platform: 'Upwork', error: error.message });
+      console.log(`⚠️  Błąd Upwork: ${error.message}`);
+    } finally {
+      if (browser) await browser.close();
     }
   }
 
