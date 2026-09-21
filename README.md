@@ -4,10 +4,10 @@ Aplikacja Node.js do automatycznego ściągania ofert pracy z wielu platform bez
 
 ## 📋 Obsługiwane platformy
 
-- ✅ **Upwork** - remote prace
+- ⚠️ **Upwork** - blokuje żądania botów (ochrona anty-scrapingowa, HTTP 403 nawet z headless browserem) — nieobsługiwane
 - ✅ **Freelancer.com** - projekty freelancerskie
 - ✅ **Pracuj.pl** - polskie oferty pracy
-- ✅ **OLX** - ogłoszenia usług IT
+- ✅ **OLX** - ogłoszenia usług IT (przez headless browser — patrz niżej)
 
 ## 🎯 Funkcje
 
@@ -30,6 +30,15 @@ cd job-scraper
 
 ```bash
 npm install
+```
+
+### 3. Zainstaluj przeglądarkę dla Playwright (wymagane dla OLX)
+
+OLX renderuje wyniki wyszukiwania w JS i odrzuca zwykłe żądania HTTP, dlatego
+scraper OLX używa headless przeglądarki (Playwright + Chromium):
+
+```bash
+npx playwright install chromium
 ```
 
 ## 🚀 Użycie
@@ -159,6 +168,17 @@ job-scraper/
 ```bash
 npm install
 ```
+
+### Błąd OLX: "Executable doesn't exist" / błąd uruchomienia przeglądarki
+```bash
+npx playwright install chromium
+```
+
+### Upwork zawsze zwraca błąd 403
+To oczekiwane — Upwork blokuje żądania botów (ochrona anty-scrapingowa) nawet
+przez headless przeglądarkę. Ominięcie tego wymagałoby technik łamiących
+zabezpieczenia strony (stealth/fingerprint spoofing), co narusza ToS Upworka —
+ta platforma jest świadomie nieobsługiwana.
 
 ### Żadne oferty się nie ściągają
 - Sprawdź internet

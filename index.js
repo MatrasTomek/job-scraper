@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -212,47 +213,68 @@ class JobScraper {
   async scrapeOLX() {
     console.log('📍 Ściąganie OLX...');
     const before = this.jobs.length;
+    // OLX serwuje listing wyłącznie po wykonaniu JS (React) i odrzuca zwykłe żądania
+    // axios/cheerio (403/404), dlatego tu używamy prawdziwej przeglądarki (Playwright).
+    // Sam URL też się zmienił: kategoria jest teraz segmentem ścieżki, nie ?category=.
+    let browser;
     try {
+      browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ userAgent: this.config.userAgent, locale: 'pl-PL' });
+
       for (const keyword of this.config.keywords) {
-        const url = `https://www.olx.pl/oferty/q-${keyword}/?category=uslugi`;
+        const url = `https://www.olx.pl/uslugi/q-${encodeURIComponent(keyword)}/`;
+        const page = await context.newPage();
 
-        const response = await axios.get(url, {
-          headers: { 'User-Agent': this.config.userAgent },
-          timeout: this.config.timeout
-        });
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.config.timeout * 3 });
+          await page.locator('[data-cy="l-card"]').first().waitFor({ timeout: 10000 }).catch(() => {});
 
-        const $ = cheerio.load(response.data);
+          const cards = await page.locator('[data-cy="l-card"]').evaluateAll(nodes =>
+            nodes.map(node => {
+              // innerText (nie textContent!) — karty OLX mają wstrzyknięte <style> (CSS-in-JS)
+              // jako dzieci elementów; textContent zgarnia też ich treść, innerText respektuje
+              // renderowanie i poprawnie je pomija.
+              const titleEl = node.querySelector('[data-testid="ad-card-title"]');
+              const linkEl = titleEl?.querySelector('a') || node.querySelector('a[href]');
+              // Kontener tytułu bywa zawiera dodatkowy zagnieżdżony "badge" z ceną —
+              // bierzemy tylko pierwszą linię tekstu, żeby cena nie dokleiła się do tytułu.
+              const rawTitle = titleEl?.innerText || node.querySelector('h4, h6')?.innerText || '';
+              return {
+                title: rawTitle.split('\n')[0]?.trim() || '',
+                price: node.querySelector('[data-testid="ad-price"]')?.innerText?.trim() || '',
+                location: node.querySelector('[data-testid="location-date"]')?.innerText?.trim() || '',
+                href: linkEl?.getAttribute('href') || ''
+              };
+            })
+          );
 
-        $('[data-testid="listing-ad"]').each((i, el) => {
-          const title = $(el).find('a h2, a h3, h2, h3')?.text()?.trim();
-          const price = $(el).find('[data-testid="listing-price"]')?.text()?.trim();
-          const location = $(el).find('[data-testid="listing-location"]')?.text()?.trim();
-          const jobLink = $(el).find('a')?.attr('href');
+          for (const card of cards) {
+            if (!card.title) continue;
+            // OLX dopełnia wyniki "podobnymi ogłoszeniami" niezwiązanymi ze słowem kluczowym,
+            // gdy w kategorii usług brakuje trafień dla niszowej frazy (np. "angular") —
+            // odsiewamy tytuły, które w ogóle nie zawierają szukanego słowa.
+            if (!card.title.toLowerCase().includes(keyword.toLowerCase())) continue;
 
-          if (title) {
             this.jobs.push({
               platform: 'OLX',
-              title,
-              location: location || '',
-              price: price || 'N/A',
-              link: jobLink || '',
+              title: card.title,
+              location: card.location || '',
+              price: card.price || 'N/A',
+              link: card.href ? new URL(card.href, 'https://www.olx.pl').href : '',
               keyword,
               scrapedAt: new Date().toISOString()
             });
           }
-        });
+        } finally {
+          await page.close();
+        }
       }
       console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na OLX`);
     } catch (error) {
-      // OLX blokuje żądania na poziomie CDN (CloudFront) — status bywa 403 lub 404
-      // losowo, niezależnie od słowa kluczowego. Wymaga headless browsera lub API.
-      const isBotWall = error.response?.status === 403 || error.response?.status === 404;
-      this.errors.push({
-        platform: 'OLX',
-        error: error.message,
-        hint: isBotWall ? 'OLX blokuje żądania botów na poziomie CDN — wymaga headless browsera lub API.' : undefined
-      });
-      console.log(`⚠️  Błąd OLX: ${error.message}${isBotWall ? ' (blokada anty-bot)' : ''}`);
+      this.errors.push({ platform: 'OLX', error: error.message });
+      console.log(`⚠️  Błąd OLX: ${error.message}`);
+    } finally {
+      if (browser) await browser.close();
     }
   }
 
