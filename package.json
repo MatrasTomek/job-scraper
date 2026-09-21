@@ -1,0 +1,19 @@
+{
+  "name": "job-scraper",
+  "version": "1.0.0",
+  "description": "Automatyczne ściąganie ofert pracy z wielu platform",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "schedule": "node schedule.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "node-cron": "^3.0.2"
+  },
+  "keywords": ["jobs", "scraper", "upwork", "freelancer"],
+  "author": "",
+  "license": "ISC"
+}
