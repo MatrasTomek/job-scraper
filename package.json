@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "schedule": "node schedule.js"
+    "schedule": "node schedule.js",
+    "ui": "node server.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

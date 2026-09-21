@@ -51,6 +51,15 @@ npm start
 
 Wynik pojawi się w pliku `jobs.json`
 
+### Podgląd ofert w przeglądarce
+
+```bash
+npm run ui
+```
+
+Otwórz [http://localhost:3000](http://localhost:3000) — proste GUI z listą ofert z `jobs.json`,
+wyszukiwarką, filtrami (platforma, słowo kluczowe, tylko z budżetem) i sortowaniem.
+
 ### Automatyczne (co 30 minut)
 
 ```bash

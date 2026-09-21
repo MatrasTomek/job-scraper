@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job Scraper – Podgląd ofert</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card-bg: #ffffff;
+    --border: #e2e4e9;
+    --text: #1c1e21;
+    --text-muted: #6b7280;
+    --accent: #2563eb;
+    --accent-bg: #eff4ff;
+    --badge-bg: #eef0f4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 20px 24px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 20px;
+  }
+  #meta {
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .controls input[type="search"] {
+    flex: 1 1 240px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  .controls select {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    background: white;
+  }
+  .controls label.checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  #reload {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #reload:hover { background: var(--badge-bg); }
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px 24px 60px;
+  }
+  #count {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .job {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+  }
+  .job-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .job h2 {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.4;
+  }
+  .job h2 a {
+    color: var(--text);
+    text-decoration: none;
+  }
+  .job h2 a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .budget {
+    flex-shrink: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .job p.desc {
+    margin: 8px 0;
+    font-size: 13.5px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .job-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+    align-items: center;
+    font-size: 12px;
+  }
+  .badge {
+    background: var(--badge-bg);
+    color: var(--text-muted);
+    padding: 3px 9px;
+    border-radius: 100px;
+    font-weight: 500;
+  }
+  .badge.platform {
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+  .scraped-at {
+    margin-left: auto;
+    color: var(--text-muted);
+  }
+  #empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 60px 20px;
+    font-size: 14px;
+  }
+  #error {
+    max-width: 900px;
+    margin: 20px auto;
+    padding: 14px 18px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    border-radius: 8px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>💼 Job Scraper</h1>
+  <div id="meta">Ładowanie…</div>
+  <div class="controls">
+    <input type="search" id="search" placeholder="Szukaj w tytule lub opisie…">
+    <select id="platform"><option value="">Wszystkie platformy</option></select>
+    <select id="keyword"><option value="">Wszystkie słowa kluczowe</option></select>
+    <select id="sort">
+      <option value="date-desc">Najnowsze najpierw</option>
+      <option value="date-asc">Najstarsze najpierw</option>
+      <option value="platform">Platforma (A-Z)</option>
+    </select>
+    <label class="checkbox"><input type="checkbox" id="onlyBudget"> Tylko z budżetem</label>
+    <button id="reload" title="Wczytaj ponownie jobs.json">↻ Odśwież</button>
+  </div>
+</header>
+
+<div id="error"></div>
+
+<main>
+  <p id="count"></p>
+  <div id="list"></div>
+  <div id="empty" style="display:none">Brak ofert spełniających kryteria.</div>
+</main>
+
+<script>
+let allJobs = [];
+
+const els = {
+  meta: document.getElementById('meta'),
+  search: document.getElementById('search'),
+  platform: document.getElementById('platform'),
+  keyword: document.getElementById('keyword'),
+  sort: document.getElementById('sort'),
+  onlyBudget: document.getElementById('onlyBudget'),
+  reload: document.getElementById('reload'),
+  list: document.getElementById('list'),
+  count: document.getElementById('count'),
+  empty: document.getElementById('empty'),
+  error: document.getElementById('error'),
+};
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str ?? '';
+  return div.innerHTML;
+}
+
+function formatDate(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString('pl-PL');
+  } catch {
+    return iso;
+  }
+}
+
+function populateFilters(jobs) {
+  const platforms = [...new Set(jobs.map(j => j.platform).filter(Boolean))].sort();
+  const keywords = [...new Set(jobs.map(j => j.keyword).filter(Boolean))].sort();
+
+  const prevPlatform = els.platform.value;
+  const prevKeyword = els.keyword.value;
+
+  els.platform.innerHTML = '<option value="">Wszystkie platformy</option>' +
+    platforms.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+  els.keyword.innerHTML = '<option value="">Wszystkie słowa kluczowe</option>' +
+    keywords.map(k => `<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('');
+
+  if (platforms.includes(prevPlatform)) els.platform.value = prevPlatform;
+  if (keywords.includes(prevKeyword)) els.keyword.value = prevKeyword;
+}
+
+function render() {
+  const q = els.search.value.trim().toLowerCase();
+  const platform = els.platform.value;
+  const keyword = els.keyword.value;
+  const onlyBudget = els.onlyBudget.checked;
+  const sort = els.sort.value;
+
+  let filtered = allJobs.filter(j => {
+    if (platform && j.platform !== platform) return false;
+    if (keyword && j.keyword !== keyword) return false;
+    if (onlyBudget && (!j.budget || j.budget === 'N/A')) return false;
+    if (q) {
+      const hay = `${j.title ?? ''} ${j.description ?? ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  filtered.sort((a, b) => {
+    if (sort === 'date-asc') return new Date(a.scrapedAt || 0) - new Date(b.scrapedAt || 0);
+    if (sort === 'platform') return (a.platform || '').localeCompare(b.platform || '');
+    return new Date(b.scrapedAt || 0) - new Date(a.scrapedAt || 0);
+  });
+
+  els.count.textContent = `${filtered.length} z ${allJobs.length} ofert`;
+  els.empty.style.display = filtered.length ? 'none' : 'block';
+
+  els.list.innerHTML = filtered.map(j => `
+    <div class="job">
+      <div class="job-top">
+        <h2><a href="${escapeHtml(j.link || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(j.title || '(bez tytułu)')}</a></h2>
+        ${j.budget && j.budget !== 'N/A' ? `<span class="budget">${escapeHtml(j.budget)}</span>` : ''}
+      </div>
+      ${j.description ? `<p class="desc">${escapeHtml(j.description)}</p>` : ''}
+      <div class="job-meta">
+        ${j.platform ? `<span class="badge platform">${escapeHtml(j.platform)}</span>` : ''}
+        ${j.keyword ? `<span class="badge">${escapeHtml(j.keyword)}</span>` : ''}
+        <span class="scraped-at">${formatDate(j.scrapedAt)}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadJobs() {
+  els.error.style.display = 'none';
+  try {
+    const res = await fetch('/jobs.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    allJobs = data.jobs || [];
+
+    const s = data.summary || {};
+    const parts = [];
+    if (s.totalJobs != null) parts.push(`${s.totalJobs} ofert`);
+    if (s.platforms) parts.push(s.platforms.join(', '));
+    if (s.scrapedAt) parts.push(`ściągnięto: ${formatDate(s.scrapedAt)}`);
+    if (s.durationSeconds != null) parts.push(`${s.durationSeconds}s`);
+    els.meta.textContent = parts.join(' · ') || 'Brak danych o skanowaniu';
+
+    populateFilters(allJobs);
+    render();
+  } catch (err) {
+    els.error.textContent = `Nie udało się wczytać jobs.json: ${err.message}`;
+    els.error.style.display = 'block';
+    els.meta.textContent = 'Błąd ładowania danych';
+  }
+}
+
+[els.search, els.platform, els.keyword, els.sort, els.onlyBudget].forEach(el =>
+  el.addEventListener('input', render)
+);
+els.reload.addEventListener('click', loadJobs);
+
+loadJobs();
+</script>
+
+</body>
+</html>
