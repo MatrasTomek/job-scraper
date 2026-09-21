@@ -1,35 +1,76 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Konfiguracja
-const CONFIG = {
-  keywords: ['angular', 'react'],
+// Domyślna konfiguracja (używana gdy brak pliku config.js)
+const DEFAULT_CONFIG = {
+  keywords: ['angular', 'react', 'frontend'],
   minBudget: 50,
   outputFile: './jobs.json',
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  timeout: 10000,
+  debug: false,
+  verbose: true,
+  filters: {
+    minPrice: 0,
+    onlyWithBudget: false,
+    excludeKeywords: []
+  }
 };
+
+// Wczytaj config.js jeśli istnieje (patrz config.example.js)
+let userConfig = {};
+try {
+  const configPath = path.join(__dirname, 'config.js');
+  if (fs.existsSync(configPath)) {
+    const mod = await import(pathToFileURL(configPath).href);
+    userConfig = mod.CONFIG || mod.default || {};
+    console.log('⚙️  Wczytano ustawienia z config.js');
+  }
+} catch (err) {
+  console.log(`⚠️  Nie udało się wczytać config.js: ${err.message}`);
+}
+
+const CONFIG = {
+  ...DEFAULT_CONFIG,
+  ...userConfig,
+  filters: { ...DEFAULT_CONFIG.filters, ...(userConfig.filters || {}) },
+  notifications: { ...(DEFAULT_CONFIG.notifications || {}), ...(userConfig.notifications || {}) }
+};
+
+// Wyciąga pierwszą liczbę z tekstu typu "$153", "8000 - 12000 PLN" itp.
+function extractNumericValue(str) {
+  if (!str) return null;
+  const match = String(str).replace(/\s/g, '').match(/[\d.,]+/);
+  if (!match) return null;
+  const normalized = match[0].replace(/,/g, '');
+  const num = parseFloat(normalized);
+  return Number.isNaN(num) ? null : num;
+}
 
 class JobScraper {
   constructor(config = {}) {
     this.config = { ...CONFIG, ...config };
     this.jobs = [];
     this.errors = [];
+    this.duration = null;
   }
 
   async scrapeUpwork() {
     console.log('📍 Ściąganie Upwork...');
+    const before = this.jobs.length;
     try {
       for (const keyword of this.config.keywords) {
         const url = `https://www.upwork.com/nx/search/jobs?q=${keyword}&sort=recency`;
 
         const response = await axios.get(url, {
           headers: { 'User-Agent': this.config.userAgent },
-          timeout: 10000
+          timeout: this.config.timeout
         });
 
         const $ = cheerio.load(response.data);
@@ -53,40 +94,46 @@ class JobScraper {
           }
         });
       }
-      console.log(`✅ Znaleziono ${this.jobs.length} ofert na Upwork`);
+      console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na Upwork`);
     } catch (error) {
+      // Upwork zwraca stronę "Challenge" (403) dla żądań bez przeglądarki —
+      // samo axios+cheerio tego nie ominie, potrzebny byłby headless browser lub oficjalne API.
+      const isBotWall = error.response?.status === 403;
       this.errors.push({
         platform: 'Upwork',
-        error: error.message
+        error: error.message,
+        hint: isBotWall ? 'Upwork blokuje żądania botów (ochrona anty-scrapingowa) — wymaga headless browsera lub API.' : undefined
       });
-      console.log(`⚠️  Błąd Upwork: ${error.message}`);
+      console.log(`⚠️  Błąd Upwork: ${error.message}${isBotWall ? ' (blokada anty-bot)' : ''}`);
     }
   }
 
   async scrapeFreelancer() {
     console.log('📍 Ściąganie Freelancer.com...');
+    const before = this.jobs.length;
     try {
       for (const keyword of this.config.keywords) {
         const url = `https://www.freelancer.com/jobs/${keyword}/?sort=time-entered,desc`;
 
         const response = await axios.get(url, {
           headers: { 'User-Agent': this.config.userAgent },
-          timeout: 10000
+          timeout: this.config.timeout
         });
 
         const $ = cheerio.load(response.data);
 
-        $('[data-qa="freelancer-project-card"]').each((i, el) => {
-          const title = $(el).find('.project-info h4, .project-info a')?.text()?.trim();
-          const description = $(el).find('.project-description')?.text()?.slice(0, 200)?.trim();
-          const budget = $(el).find('.bid-range, .project-type')?.text()?.trim();
-          const jobLink = $(el).find('a')?.attr('href');
+        $('.JobSearchCard-item').each((i, el) => {
+          const titleEl = $(el).find('.JobSearchCard-primary-heading-link');
+          const title = titleEl.text()?.trim();
+          const description = $(el).find('.JobSearchCard-primary-description')?.text()?.trim()?.slice(0, 200);
+          const budget = $(el).find('.JobSearchCard-primary-price')?.text()?.replace(/\s+/g, ' ')?.trim();
+          const jobLink = titleEl.attr('href');
 
           if (title) {
             this.jobs.push({
               platform: 'Freelancer.com',
               title,
-              description,
+              description: description || '',
               budget: budget || 'N/A',
               link: jobLink ? `https://www.freelancer.com${jobLink}` : '',
               keyword,
@@ -95,7 +142,7 @@ class JobScraper {
           }
         });
       }
-      console.log(`✅ Znaleziono ofert na Freelancer`);
+      console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na Freelancer`);
     } catch (error) {
       this.errors.push({
         platform: 'Freelancer.com',
@@ -107,40 +154,53 @@ class JobScraper {
 
   async scrapePracujPl() {
     console.log('📍 Ściąganie Pracuj.pl...');
+    const before = this.jobs.length;
     try {
       for (const keyword of this.config.keywords) {
         const url = `https://www.pracuj.pl/praca/${keyword}`;
 
         const response = await axios.get(url, {
           headers: { 'User-Agent': this.config.userAgent },
-          timeout: 10000
+          timeout: this.config.timeout
         });
 
         const $ = cheerio.load(response.data);
 
-        $('[data-test="jobCard"]').each((i, el) => {
-          const titleEl = $(el).find('h2, .jobTitle, [data-test="jobCardTitle"]');
-          const title = titleEl.text()?.trim();
-          const companyEl = $(el).find('.company, [data-test="companyName"]');
-          const company = companyEl.text()?.trim();
-          const salaryEl = $(el).find('.salary, [data-test="salary"]');
-          const salary = salaryEl.text()?.trim();
-          const jobLink = $(el).find('a')?.attr('href');
+        // Pracuj.pl to aplikacja Next.js — oferty nie są w statycznym HTML,
+        // tylko w danych __NEXT_DATA__ dołączonych do strony.
+        const nextDataRaw = $('#__NEXT_DATA__').html();
+        if (!nextDataRaw) {
+          throw new Error('Nie znaleziono __NEXT_DATA__ na stronie Pracuj.pl (struktura strony mogła się zmienić)');
+        }
 
-          if (title) {
+        const nextData = JSON.parse(nextDataRaw);
+        const queries = nextData?.props?.pageProps?.dehydratedState?.queries || [];
+
+        for (const query of queries) {
+          const groupedOffers = query?.state?.data?.groupedOffers;
+          if (!Array.isArray(groupedOffers)) continue;
+
+          for (const offer of groupedOffers) {
+            const title = offer.jobTitle?.trim();
+            if (!title) continue;
+
+            const firstOffer = offer.offers?.[0];
+
             this.jobs.push({
               platform: 'Pracuj.pl',
               title,
-              company: company || '',
-              budget: salary || 'N/A',
-              link: jobLink || '',
+              company: offer.companyName || '',
+              description: offer.jobDescription?.slice(0, 200)?.trim() || '',
+              budget: offer.salaryDisplayText || 'N/A',
+              location: firstOffer?.displayWorkplace || '',
+              link: firstOffer?.offerAbsoluteUri || '',
               keyword,
               scrapedAt: new Date().toISOString()
             });
           }
-        });
+        }
       }
-      console.log(`✅ Znaleziono ofert na Pracuj.pl`);
+      console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na Pracuj.pl`);
     } catch (error) {
       this.errors.push({
         platform: 'Pracuj.pl',
@@ -152,44 +212,101 @@ class JobScraper {
 
   async scrapeOLX() {
     console.log('📍 Ściąganie OLX...');
+    const before = this.jobs.length;
+    // OLX serwuje listing wyłącznie po wykonaniu JS (React) i odrzuca zwykłe żądania
+    // axios/cheerio (403/404), dlatego tu używamy prawdziwej przeglądarki (Playwright).
+    // Sam URL też się zmienił: kategoria jest teraz segmentem ścieżki, nie ?category=.
+    let browser;
     try {
+      browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ userAgent: this.config.userAgent, locale: 'pl-PL' });
+
       for (const keyword of this.config.keywords) {
-        const url = `https://www.olx.pl/oferty/q-${keyword}/?category=uslugi`;
+        const url = `https://www.olx.pl/uslugi/q-${encodeURIComponent(keyword)}/`;
+        const page = await context.newPage();
 
-        const response = await axios.get(url, {
-          headers: { 'User-Agent': this.config.userAgent },
-          timeout: 10000
-        });
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.config.timeout * 3 });
+          await page.locator('[data-cy="l-card"]').first().waitFor({ timeout: 10000 }).catch(() => {});
 
-        const $ = cheerio.load(response.data);
+          const cards = await page.locator('[data-cy="l-card"]').evaluateAll(nodes =>
+            nodes.map(node => {
+              // innerText (nie textContent!) — karty OLX mają wstrzyknięte <style> (CSS-in-JS)
+              // jako dzieci elementów; textContent zgarnia też ich treść, innerText respektuje
+              // renderowanie i poprawnie je pomija.
+              const titleEl = node.querySelector('[data-testid="ad-card-title"]');
+              const linkEl = titleEl?.querySelector('a') || node.querySelector('a[href]');
+              // Kontener tytułu bywa zawiera dodatkowy zagnieżdżony "badge" z ceną —
+              // bierzemy tylko pierwszą linię tekstu, żeby cena nie dokleiła się do tytułu.
+              const rawTitle = titleEl?.innerText || node.querySelector('h4, h6')?.innerText || '';
+              return {
+                title: rawTitle.split('\n')[0]?.trim() || '',
+                price: node.querySelector('[data-testid="ad-price"]')?.innerText?.trim() || '',
+                location: node.querySelector('[data-testid="location-date"]')?.innerText?.trim() || '',
+                href: linkEl?.getAttribute('href') || ''
+              };
+            })
+          );
 
-        $('[data-testid="listing-ad"]').each((i, el) => {
-          const title = $(el).find('a h2, a h3, h2, h3')?.text()?.trim();
-          const price = $(el).find('[data-testid="listing-price"]')?.text()?.trim();
-          const location = $(el).find('[data-testid="listing-location"]')?.text()?.trim();
-          const jobLink = $(el).find('a')?.attr('href');
+          for (const card of cards) {
+            if (!card.title) continue;
+            // OLX dopełnia wyniki "podobnymi ogłoszeniami" niezwiązanymi ze słowem kluczowym,
+            // gdy w kategorii usług brakuje trafień dla niszowej frazy (np. "angular") —
+            // odsiewamy tytuły, które w ogóle nie zawierają szukanego słowa.
+            if (!card.title.toLowerCase().includes(keyword.toLowerCase())) continue;
 
-          if (title) {
             this.jobs.push({
               platform: 'OLX',
-              title,
-              location: location || '',
-              price: price || 'N/A',
-              link: jobLink || '',
+              title: card.title,
+              location: card.location || '',
+              price: card.price || 'N/A',
+              link: card.href ? new URL(card.href, 'https://www.olx.pl').href : '',
               keyword,
               scrapedAt: new Date().toISOString()
             });
           }
-        });
+        } finally {
+          await page.close();
+        }
       }
-      console.log(`✅ Znaleziono ofert na OLX`);
+      console.log(`✅ Znaleziono ${this.jobs.length - before} ofert na OLX`);
     } catch (error) {
-      this.errors.push({
-        platform: 'OLX',
-        error: error.message
-      });
+      this.errors.push({ platform: 'OLX', error: error.message });
       console.log(`⚠️  Błąd OLX: ${error.message}`);
+    } finally {
+      if (browser) await browser.close();
     }
+  }
+
+  applyFilters(jobs) {
+    const filters = this.config.filters || {};
+    const excludeKeywords = (filters.excludeKeywords || []).map(k => k.toLowerCase());
+
+    return jobs.filter(job => {
+      const budgetText = job.budget ?? job.price;
+
+      if (filters.onlyWithBudget && (!budgetText || budgetText === 'N/A')) {
+        return false;
+      }
+
+      if (filters.minPrice) {
+        const numericValue = extractNumericValue(budgetText);
+        // Jeśli nie da się wyciągnąć liczby z budżetu, nie odrzucamy oferty —
+        // po prostu nie wiemy, czy spełnia próg.
+        if (numericValue !== null && numericValue < filters.minPrice) {
+          return false;
+        }
+      }
+
+      if (excludeKeywords.length) {
+        const haystack = `${job.title} ${job.description || ''}`.toLowerCase();
+        if (excludeKeywords.some(k => haystack.includes(k))) {
+          return false;
+        }
+      }
+
+      return true;
+    });
   }
 
   async scrapeAll() {
@@ -203,11 +320,16 @@ class JobScraper {
     await this.scrapePracujPl();
     await this.scrapeOLX();
 
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    const totalFound = this.jobs.length;
+    this.jobs = this.applyFilters(this.jobs);
+    const filteredOut = totalFound - this.jobs.length;
+
+    this.duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
     console.log('\n' + '='.repeat(50));
-    console.log(`✅ Gotowe! Ączas: ${duration}s`);
-    console.log(`📊 Łącznie znaleziono: ${this.jobs.length} ofert`);
+    console.log(`✅ Gotowe! Czas: ${this.duration}s`);
+    console.log(`📊 Łącznie znaleziono: ${totalFound} ofert${filteredOut ? ` (odfiltrowano: ${filteredOut})` : ''}`);
+    console.log(`📊 Po filtrach: ${this.jobs.length} ofert`);
     if (this.errors.length > 0) {
       console.log(`⚠️  Błędy: ${this.errors.length}`);
     }
@@ -222,7 +344,7 @@ class JobScraper {
         totalJobs: this.jobs.length,
         platforms: [...new Set(this.jobs.map(j => j.platform))],
         scrapedAt: new Date().toISOString(),
-        duration: 'check timestamps'
+        durationSeconds: this.duration !== null ? Number(this.duration) : null
       },
       jobs: this.jobs,
       errors: this.errors
@@ -239,11 +361,7 @@ class JobScraper {
 
 // Główny kod
 async function main() {
-  // Możesz zmienić słowa kluczowe tutaj
-  const scraper = new JobScraper({
-    keywords: ['angular', 'react', 'frontend'],
-    outputFile: './jobs.json'
-  });
+  const scraper = new JobScraper();
 
   const results = await scraper.scrapeAll();
   await scraper.saveToFile();
@@ -254,3 +372,5 @@ async function main() {
 }
 
 main().catch(console.error);
+
+export { JobScraper };
